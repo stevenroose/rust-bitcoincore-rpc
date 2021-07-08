@@ -215,6 +215,77 @@ impl Auth {
     }
 }
 
+impl serde::Serialize for Auth {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+
+        match self {
+            Auth::None => s.serialize_none(),
+            Auth::UserPass(user, pass) => {
+                let mut map = s.serialize_map(Some(2))?;
+                map.serialize_entry("username", user)?;
+                map.serialize_entry("password", pass)?;
+                map.end()
+            }
+            Auth::CookieFile(path) => {
+                let mut map = s.serialize_map(Some(1))?;
+                map.serialize_entry("cookie_file", path)?;
+                map.end()
+            }
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Auth {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> result::Result<Self, D::Error> {
+        use serde::de::Error;
+
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = Auth;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("an Auth value")
+            }
+
+            fn visit_none<E>(self) -> result::Result<Self::Value, E> {
+                Ok(Auth::None)
+            }
+
+            fn visit_unit<E>(self) -> result::Result<Self::Value, E> {
+                Ok(Auth::None)
+            }
+
+            fn visit_map<M: serde::de::MapAccess<'de>>(self, mut m: M) -> result::Result<Self::Value, M::Error> {
+                let mut cookie = None;
+                let mut user = None;
+                let mut pass = None;
+                while let Some((key, value)) = m.next_entry::<_, String>()? {
+                    match key {
+                        "cookie_file" => cookie = Some(value),
+                        "username" => user = Some(value),
+                        "password" => pass = Some(value),
+                        k => return Err(M::Error::custom(&format!(
+                            "unknown field for Auth provided: {}", k,
+                        ))),
+                    }
+                }
+
+                match (cookie, user, pass) {
+                    (Some(cf), None, None) => Ok(Auth::CookieFile(cf.into())),
+                    (None, Some(u), Some(p)) => Ok(Auth::UserPass(u, p)),
+                    (None, Some(_), None) => Err(M::Error::custom("password missing")),
+                    (None, None, Some(_)) => Err(M::Error::custom("username missing")),
+                    (_, _, _) => Err(M::Error::custom(
+                        "provide either username+password or cookie_file as auth"
+                    )),
+                }
+            }
+        }
+        d.deserialize_any(Visitor)
+    }
+}
+
 pub trait RpcApi: Sized {
     /// Call a `cmd` rpc with given `args` list
     fn call<T: for<'a> serde::de::Deserialize<'a>>(
@@ -1243,5 +1314,26 @@ mod tests {
     #[test]
     fn test_handle_defaults() {
         test_handle_defaults_inner().unwrap();
+    }
+
+    #[test]
+    fn test_serde_auth() {
+        let auth = Auth::UserPass("mario".to_string(), "1234".to_string());
+        let ser = serde_json::to_string(&auth).unwrap();
+        assert_eq!("{\"username\":\"mario\",\"password\":\"1234\"}", ser);
+        let des: Auth = serde_json::from_str(&ser).unwrap();
+        assert_eq!(auth, des);
+
+        let auth = Auth::CookieFile("secret".into());
+        let ser = serde_json::to_string(&auth).unwrap();
+        assert_eq!("{\"cookie_file\":\"secret\"}", ser);
+        let des: Auth = serde_json::from_str(&ser).unwrap();
+        assert_eq!(auth, des);
+
+        let auth = Auth::None;
+        let ser = serde_json::to_string(&auth).unwrap();
+        assert_eq!("null", ser);
+        let des: Auth = serde_json::from_str(&ser).unwrap();
+        assert_eq!(auth, des);
     }
 }
